@@ -1,0 +1,269 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
+  <title>Pixel Walk — Unfinished Playable Demo</title>
+  <style>
+    html,body{height:100%;margin:0;background:#111;color:#ddd;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    #gameWrap{display:grid;place-items:center;height:100%;padding:12px;box-sizing:border-box}
+    canvas{background:#7ec0ee;image-rendering:pixelated; /* crisp pixels */border:6px solid #222;border-radius:8px}
+    .ui{position:fixed;left:12px;bottom:12px;z-index:40}
+    .hint{position:fixed;right:12px;bottom:12px;background:rgba(0,0,0,0.5);padding:8px 10px;border-radius:8px;font-size:13px}
+    /* joystick */
+    .joy-wrap{position:fixed;left:12px;bottom:12px;width:140px;height:140px;touch-action:none;display:none}
+    .joy-base{position:absolute;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.14);border-radius:50%;display:flex;align-items:center;justify-content:center}
+    .joy-stick{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,0.9);box-shadow:0 4px 12px rgba(0,0,0,0.4)}
+    .controls-row{display:flex;gap:6px}
+    .kbd{background:#222;padding:6px 8px;border-radius:6px;font-size:13px}
+    @media (max-width:900px){
+      .joy-wrap{display:block}
+      .hint{right:12px;bottom:170px}
+    }
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <canvas id="game" width="640" height="480"></canvas>
+  </div>  <div class="ui">
+    <div class="controls-row">
+      <div class="kbd">W A S D / ↑ ← ↓ →</div>
+      <div class="kbd">Mobile: joystick</div>
+    </div>
+  </div>
+  <div class="hint">Move around the boxed area. (No interactions yet — demo)</div>  <!-- Mobile joystick -->  <div class="joy-wrap" id="joyWrap">
+    <div class="joy-base" id="joyBase"></div>
+    <div class="joy-stick" id="joyStick"></div>
+  </div>  <script>
+  // Single-file pixel-walk demo
+  // Character PNG: using the URL you provided. It may redirect — that's okay in-browser.
+  const SPRITE_SRC = 'https://ibb.co/W4N53XzC'; // if you have a raw .png URL, replace here for best results
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  // Keep pixels crisp when scaling
+  ctx.imageSmoothingEnabled = false;
+
+  // Virtual resolution for pixel-art feel
+  const V_WIDTH = 320;
+  const V_HEIGHT = 240;
+  // We'll render to an offscreen buffer and scale to canvas size for crisp pixels.
+  const buffer = document.createElement('canvas');
+  buffer.width = V_WIDTH;
+  buffer.height = V_HEIGHT;
+  const bctx = buffer.getContext('2d');
+  bctx.imageSmoothingEnabled = false;
+
+  // Resize canvas to fill while keeping aspect ratio
+  function fitCanvas() {
+    const padding = 24; // match wrapper padding
+    const maxW = Math.min(window.innerWidth - padding, 960);
+    const maxH = Math.min(window.innerHeight - padding, 720);
+    // maintain buffer aspect ratio
+    const ar = V_WIDTH / V_HEIGHT;
+    let w = maxW;
+    let h = Math.round(w / ar);
+    if (h > maxH) { h = maxH; w = Math.round(h * ar); }
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+  }
+  window.addEventListener('resize', fitCanvas);
+  fitCanvas();
+
+  // Game world: a single box-shaped area
+  const box = { x: 24, y: 24, w: V_WIDTH - 48, h: V_HEIGHT - 48 };
+
+  // Player
+  const player = {
+    x: V_WIDTH/2,
+    y: V_HEIGHT/2,
+    w: 12,
+    h: 16,
+    speed: 1.6, // pixels per frame (tweakable)
+    vx: 0,
+    vy: 0,
+    facing: 0,
+  };
+
+  // Load sprite
+  const sprite = new Image();
+  sprite.crossOrigin = 'anonymous';
+  sprite.src = SPRITE_SRC;
+  let spriteReady = false;
+  sprite.onload = () => { spriteReady = true; }
+  sprite.onerror = () => { console.warn('Sprite failed to load. Replace SPRITE_SRC with a direct PNG URL if needed.'); }
+
+  // Controls
+  const keys = { up:false, down:false, left:false, right:false };
+  window.addEventListener('keydown', e => {
+    if (['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (e.key === 'w' || e.key === 'W' || e.key === 'ArrowUp') keys.up = true;
+    if (e.key === 's' || e.key === 'S' || e.key === 'ArrowDown') keys.down = true;
+    if (e.key === 'a' || e.key === 'A' || e.key === 'ArrowLeft') keys.left = true;
+    if (e.key === 'd' || e.key === 'D' || e.key === 'ArrowRight') keys.right = true;
+  });
+  window.addEventListener('keyup', e => {
+    if (e.key === 'w' || e.key === 'W' || e.key === 'ArrowUp') keys.up = false;
+    if (e.key === 's' || e.key === 'S' || e.key === 'ArrowDown') keys.down = false;
+    if (e.key === 'a' || e.key === 'A' || e.key === 'ArrowLeft') keys.left = false;
+    if (e.key === 'd' || e.key === 'D' || e.key === 'ArrowRight') keys.right = false;
+  });
+
+  // Mobile joystick
+  const joyWrap = document.getElementById('joyWrap');
+  const joyStick = document.getElementById('joyStick');
+  const joyBase = document.getElementById('joyBase');
+  let joyActive = false;
+  let joyCenter = { x: 0, y: 0 };
+  let joyPos = { x: 0, y: 0 };
+  const maxRadius = 48; // pixels in joystick coordinate
+
+  function getTouchPoint(evt) {
+    const t = evt.targetTouches ? evt.targetTouches[0] : evt;
+    return { x: t.clientX, y: t.clientY };
+  }
+
+  function startJoy(evt){
+    evt.preventDefault();
+    joyActive = true;
+    const rect = joyWrap.getBoundingClientRect();
+    // center of joystick base
+    joyCenter.x = rect.left + rect.width/2;
+    joyCenter.y = rect.top + rect.height/2;
+    const p = getTouchPoint(evt);
+    updateJoyWithPoint(p.x, p.y);
+  }
+  function moveJoy(evt){
+    if (!joyActive) return;
+    evt.preventDefault();
+    const p = getTouchPoint(evt);
+    updateJoyWithPoint(p.x, p.y);
+  }
+  function endJoy(evt){
+    joyActive = false;
+    joyPos.x = 0; joyPos.y = 0;
+    joyStick.style.transform = 'translate(-50%,-50%)';
+  }
+  function updateJoyWithPoint(px, py){
+    const dx = px - joyCenter.x;
+    const dy = py - joyCenter.y;
+    const dist = Math.hypot(dx,dy);
+    const angle = Math.atan2(dy,dx);
+    const r = Math.min(dist, maxRadius);
+    const nx = Math.cos(angle) * r;
+    const ny = Math.sin(angle) * r;
+    // convert to normalized direction -1..1
+    joyPos.x = nx / maxRadius;
+    joyPos.y = ny / maxRadius;
+    // move the visual stick
+    const pxOffset = (nx / joyWrap.clientWidth) * 100;
+    const pyOffset = (ny / joyWrap.clientHeight) * 100;
+    joyStick.style.transform = `translate(calc(-50% + ${pxOffset}% ), calc(-50% + ${pyOffset}%))`;
+  }
+
+  joyWrap.addEventListener('touchstart', startJoy, {passive:false});
+  joyWrap.addEventListener('touchmove', moveJoy, {passive:false});
+  joyWrap.addEventListener('touchend', endJoy);
+  joyWrap.addEventListener('touchcancel', endJoy);
+  // support mouse for testing on desktop
+  joyWrap.addEventListener('mousedown', (e)=>{ startJoy(e); window.addEventListener('mousemove', moveJoy); window.addEventListener('mouseup', ()=>{ endJoy(); window.removeEventListener('mousemove', moveJoy); }, {once:true}); });
+
+  // Game loop
+  let last = performance.now();
+  function step(now){
+    const dt = Math.min(60, now - last) / (1000/60); // dt in frames (target 60)
+    last = now;
+    update(dt);
+    render();
+    requestAnimationFrame(step);
+  }
+
+  function update(dt){
+    // reset velocity
+    let vx = 0, vy = 0;
+    // keyboard
+    if (keys.up) vy -= 1;
+    if (keys.down) vy += 1;
+    if (keys.left) vx -= 1;
+    if (keys.right) vx += 1;
+    // joystick overrides/augments
+    if (Math.abs(joyPos.x) > 0.05 || Math.abs(joyPos.y) > 0.05) {
+      vx += joyPos.x;
+      vy += joyPos.y;
+    }
+    // normalize
+    const mag = Math.hypot(vx,vy);
+    if (mag > 0.001) {
+      vx = vx / mag;
+      vy = vy / mag;
+      player.x += vx * player.speed * dt;
+      player.y += vy * player.speed * dt;
+      player.facing = Math.atan2(vy, vx);
+    }
+    // clamp inside box
+    const halfW = player.w/2, halfH = player.h/2;
+    player.x = Math.max(box.x + halfW, Math.min(box.x + box.w - halfW, player.x));
+    player.y = Math.max(box.y + halfH, Math.min(box.y + box.h - halfH, player.y));
+  }
+
+  function render(){
+    // draw to buffer first
+    bctx.clearRect(0,0,V_WIDTH,V_HEIGHT);
+    // background (sky already handled by canvas CSS but draw a ground)
+    bctx.fillStyle = '#7ec0ee';
+    bctx.fillRect(0,0,V_WIDTH,V_HEIGHT);
+
+    // draw boxed area (updated style like image)
+    // Wall color
+    bctx.fillStyle = '#d7c1e1';
+    bctx.fillRect(box.x, box.y, box.w, box.h);
+
+    // Floor (wood planks)
+    const plankH = 6;
+    for (let yy = 0; yy < box.h; yy += plankH) {
+      bctx.fillStyle = yy % (plankH*2) === 0 ? '#b7865b' : '#a8744f';
+      bctx.fillRect(box.x, box.y + yy, box.w, plankH);
+    }
+
+    // Border
+    bctx.strokeStyle = '#8b5a2b';
+    bctx.lineWidth = 3;
+    bctx.strokeRect(box.x + 1, box.y + 1, box.w - 2, box.h - 2);(box.x + 1, box.y + 1, box.w - 2, box.h - 2);
+
+    // draw player — if sprite ready, draw sprite centered; otherwise draw placeholder
+    if (spriteReady) {
+      // draw sprite centered at player.x,y with nearest-neighbor scaling
+      // Assume sprite is a single-frame character. We'll scale it up slightly for pixel feel.
+      const drawW = player.w * 2; // scale factor
+      const drawH = player.h * 2;
+      // If sprite image is larger, we can just draw a small portion — for now draw full image scaled to drawW/drawH
+      bctx.drawImage(sprite, player.x - drawW/2, player.y - drawH/2, drawW, drawH);
+    } else {
+      // placeholder pixel character
+      bctx.fillStyle = '#222';
+      bctx.fillRect(player.x - player.w/2, player.y - player.h/2, player.w, player.h);
+      bctx.fillStyle = '#ffcc00';
+      bctx.fillRect(player.x - 3, player.y - player.h/2 + 2, 6, 6);
+    }
+
+    // copy buffer to main canvas (scaled)
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    // Use drawImage to scale crisp because imageSmoothingEnabled=false
+    ctx.drawImage(buffer, 0, 0, canvas.width, canvas.height);
+  }
+
+  // Start loop
+  requestAnimationFrame(step);
+
+  // Show joystick only on touch devices
+  function isTouchDevice(){ return 'ontouchstart' in window || navigator.maxTouchPoints > 0; }
+  if (isTouchDevice()){
+    joyWrap.style.display = 'block';
+  } else {
+    joyWrap.style.display = 'none';
+  }
+
+  // Helpful note for the user: if your sprite isn't showing, replace SPRITE_SRC with a direct PNG URL.
+  </script></body>
+</html>
